@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      # next typegen gera os tipos de rotas (LayoutProps etc.) que o tsc precisa numa cópia nova.
+      - run: npm run typecheck
+      - run: npm test
+      # Os testes não chamam nenhum modelo, então não precisam de chave de API.
+      - run: npm run build

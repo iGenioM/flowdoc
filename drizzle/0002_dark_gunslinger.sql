@@ -1,0 +1,1 @@
+ALTER TABLE `flow` ADD `layout` text;

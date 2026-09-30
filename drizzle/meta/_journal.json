@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1790733415991,
+      "tag": "0000_aromatic_silver_fox",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790733988699,
+      "tag": "0001_gigantic_electro",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790769189207,
+      "tag": "0002_dark_gunslinger",
+      "breakpoints": true
+    }
+  ]
+}

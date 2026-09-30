@@ -1,0 +1,1 @@
+ALTER TABLE `flow` ADD `entry_points` text DEFAULT '[]' NOT NULL;
