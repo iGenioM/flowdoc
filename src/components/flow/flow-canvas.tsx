@@ -8,15 +8,17 @@ import { saveLayout, saveManual } from "@/app/actions";
 import * as E from "@/core/edit";
 import type { EditApi } from "./node-editor";
 import { Background, ConnectionMode, Controls, MarkerType, ReactFlow, ReactFlowProvider, getNodesBounds, getViewportForBounds, useReactFlow, type Connection, type Edge, type Node, type NodeChange } from "@xyflow/react";
-import { dropTarget, layoutBoard, placeAll, routeSides, stretchLayout, type Pt } from "@/core/layout";
+import { corridorFractions, dropTarget, handlePoint, layoutBoard, placeAll, routeSides, stretchLayout, type Pt } from "@/core/layout";
 import { DEFAULT_LANES, EMPTY_OVERRIDES, type FlowDoc, type LaneConfig, type LayoutOverrides, type Side } from "@/core/schema";
 import type { DocDiff } from "@/analysis/diff";
 import { toPng, toSvg } from "html-to-image";
 import { NodeDrawer, type Review } from "./drawer";
 import { Legend } from "./legend";
+import { FlowEdge } from "./flow-edge";
 import { LANE_DESC, LaneNode, StepNode, type LaneData, type StepData } from "./nodes";
 
 const nodeTypes = { step: StepNode, lane: LaneNode };
+const edgeTypes = { flow: FlowEdge };
 const KIND = {
   sync: { color: "#6420EF", dash: undefined },
   async: { color: "#160253", dash: "6 4" },
@@ -55,7 +57,7 @@ function Canvas({ doc: saved, repoRoot, lanes, flowId, review, diff, projectId, 
   const [selEdge, setSelEdge] = useState<string | null>(null);
   const [linking, setLinking] = useState(false); // uma seta está sendo arrastada: mostra as bolinhas de todos os nós
   const anyDirty = dirty || layDirty;
-  const setOv = (fn: (l: LayoutOverrides) => LayoutOverrides) => { setLay(fn(lay)); setLayDirty(true); };
+  const setOv = (fn: (l: LayoutOverrides) => LayoutOverrides) => { setLay((l) => fn(l)); setLayDirty(true); };
   // novo `saved` do servidor (após salvar/refresh) substitui o rascunho, exceto se há edição não salva
   const [seen, setSeen] = useState(saved);
   if (seen !== saved) { setSeen(saved); if (!dirty) setDoc(saved); }
@@ -128,21 +130,37 @@ function Canvas({ doc: saved, repoRoot, lanes, flowId, review, diff, projectId, 
       data: { step: board.nodes.find((n) => n.id === p.id)!, editing, linking, dim: !matches(p.id) || (!!related && !related.has(p.id)), num: numOf.get(p.id), review: showReview ? review?.statuses[p.id] : undefined, diff: !showDiff ? undefined : diff?.added.includes(p.id) ? "added" : diff?.changed.includes(p.id) ? "changed" : undefined } satisfies StepData,
     })),
   ];
+  // lados de cada seta e posição do corredor do meio (a do usuário, ou automática afastando setas que se sobrepõem)
+  const sidesOf = new Map(board.edges.map((e) => [e.id, routeSides(pos.get(e.from)!, pos.get(e.to)!, lay.edges[`${board.id}/${e.id}`])] as const));
+  const fractions = corridorFractions(board.edges.map((e) => {
+    const [s, t] = sidesOf.get(e.id)!;
+    return { id: e.id, s, t, a: handlePoint(pos.get(e.from)!, s), b: handlePoint(pos.get(e.to)!, t), manual: lay.edges[`${board.id}/${e.id}`]?.mid };
+  }));
+  const setSeg = (edgeId: string, part: "a" | "mid" | "b", value: number | undefined) => setOv((l) => {
+    const key = `${board.id}/${edgeId}`;
+    const cur = { ...l.edges[key] };
+    if (value === undefined) delete cur[part]; else cur[part] = value;
+    return { ...l, edges: { ...l.edges, [key]: cur } };
+  });
+  const resetShape = (edgeId: string) => setOv((l) => {
+    const key = `${board.id}/${edgeId}`;
+    const { s, t } = l.edges[key] ?? {};
+    return { ...l, edges: { ...l.edges, [key]: { s, t } } };
+  });
+
   const edges: Edge[] = board.edges.map((e) => {
     const from = board.nodes.find((n) => n.id === e.from)!, to = board.nodes.find((n) => n.id === e.to)!;
     const kind = e.type === "error" || to.type === "error" ? "err" : from.lane === "db" || to.lane === "db" ? "data"
       : ASYNC_LANES.has(from.lane) || ASYNC_LANES.has(to.lane) || from.lane === "third_party" ? "async" : "sync";
     const { color, dash } = KIND[kind];
-    const [ss, tt] = routeSides(pos.get(e.from)!, pos.get(e.to)!, lay.edges[`${board.id}/${e.id}`]);
+    const [ss, tt] = sidesOf.get(e.id)!;
     const picked = selEdge === e.id;
     const fade = sel && e.from !== sel && e.to !== sel ? 0.12 : 1;
     return {
-      id: e.id, source: e.from, target: e.to, sourceHandle: `s-${ss}`, targetHandle: `t-${tt}`, label: e.label, type: "smoothstep", reconnectable: editing, interactionWidth: 24,
-      pathOptions: { borderRadius: 0, offset: 16 },
+      id: e.id, source: e.from, target: e.to, sourceHandle: `s-${ss}`, targetHandle: `t-${tt}`, type: "flow", reconnectable: editing, interactionWidth: editing ? 10 : 24, selected: picked, // 10px: linhas afastadas de 12px ainda precisam ser selecionáveis uma a uma
+      data: { mid: fractions.get(e.id), a: lay.edges[`${board.id}/${e.id}`]?.a, b: lay.edges[`${board.id}/${e.id}`]?.b, editable: editing, label: e.label, labelBorder: kind === "err" ? "#F2B8B5" : "#DCDCE4", fade, onSeg: setSeg, onPick: (eid: string) => { setSelEdge(eid); setSel(null); } },
       style: { stroke: color, strokeWidth: picked ? 3.5 : fade === 1 && sel ? 2.5 : 1.75, strokeDasharray: dash, opacity: fade },
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-      labelStyle: { fontSize: 10, fontWeight: 500, fill: "#160253", opacity: fade },
-      labelBgStyle: { fill: "#fff", stroke: kind === "err" ? "#F2B8B5" : "#DCDCE4", opacity: fade }, labelBgPadding: [8, 4] as [number, number], labelBgBorderRadius: 10,
     };
   });
   // exporta a prancheta inteira (não só o viewport atual), com fundo opaco
@@ -229,7 +247,7 @@ function Canvas({ doc: saved, repoRoot, lanes, flowId, review, diff, projectId, 
 
   return (
     <div className="relative h-full w-full bg-[#F4F4F6] text-[#160253]" style={{ fontFamily: "var(--font-poppins), sans-serif" }}>
-      <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView minZoom={0.2} nodesConnectable={editing} connectionMode={ConnectionMode.Loose}
+      <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView minZoom={0.2} nodesConnectable={editing} connectionMode={ConnectionMode.Loose}
         edgesReconnectable={editing} reconnectRadius={26} connectionRadius={32} snapToGrid={editing} snapGrid={[10, 10]}
         onConnectStart={() => setLinking(true)} onConnectEnd={() => setLinking(false)} onReconnectStart={() => setLinking(true)} onReconnectEnd={() => setLinking(false)}
         onNodesChange={onNodesChange} onNodeDragStop={onNodeDragStop} onReconnect={onReconnect} onConnect={onConnect}
@@ -283,7 +301,7 @@ function Canvas({ doc: saved, repoRoot, lanes, flowId, review, diff, projectId, 
       {menu === "help" && <div className="absolute right-3 top-[64px] z-40"><Legend /></div>}
 
       {/* rodapé: sobreposições e contadores */}
-      <div className="absolute bottom-3 left-3 z-20 space-y-2">
+      <div className="absolute bottom-3 left-3 z-20 flex max-w-[calc(100%-1.5rem)] flex-col items-start gap-2">
         {editing && selEdge && (() => {
           const e = board.edges.find((x) => x.id === selEdge);
           if (!e) return null;
@@ -298,6 +316,8 @@ function Canvas({ doc: saved, repoRoot, lanes, flowId, review, diff, projectId, 
               <select className="h-8 rounded-lg border border-slate-200 px-1 text-sm" value={e.type} onChange={(ev) => apply(E.patchEdge(doc, board.id, e.id, { type: ev.target.value as "normal" }))}><option value="normal">normal</option><option value="error">erro / retry</option></select>
               <label className="flex items-center gap-1">sai <select className="h-8 rounded-lg border border-slate-200 px-1" value={ov?.s ?? ""} onChange={(ev) => setSides(e.id, (ev.target.value || undefined) as Side, ov?.t)}><option value="">auto ({auto[0]})</option>{SIDE_OPTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
               <label className="flex items-center gap-1">entra <select className="h-8 rounded-lg border border-slate-200 px-1" value={ov?.t ?? ""} onChange={(ev) => setSides(e.id, ov?.s, (ev.target.value || undefined) as Side)}><option value="">auto ({auto[1]})</option>{SIDE_OPTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></label>
+              {(ov?.mid !== undefined || ov?.a !== undefined || ov?.b !== undefined) && <button className="rounded-lg px-2 py-1 hover:bg-slate-100" onClick={() => resetShape(e.id)}>Linha automática</button>}
+              <span className="text-xs text-slate-500">Arraste os pontos da linha</span>
               <button className="rounded-lg px-2 py-1 text-red-600 hover:bg-red-50" onClick={() => { apply(E.removeEdge(doc, board.id, e.id)); setSelEdge(null); }}>Excluir</button>
             </div>
           );

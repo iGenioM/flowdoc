@@ -110,3 +110,102 @@ describe("raias que esticam", () => {
     expect(s.width).toBeGreaterThanOrEqual(l.width + 500 + NODE_W);
   });
 });
+
+describe("corredor da linha", () => {
+  const P = (x: number, y: number) => ({ x, y });
+  it("só existe quando sai e chega no mesmo eixo e o destino está à frente", async () => {
+    const { corridor } = await import("./layout");
+    expect(corridor("r", "l", P(0, 0), P(100, 50))).toBe("h");
+    expect(corridor("l", "r", P(100, 0), P(0, 50))).toBe("h");
+    expect(corridor("b", "t", P(0, 0), P(40, 100))).toBe("v");
+    expect(corridor("r", "l", P(100, 0), P(0, 50))).toBeNull();   // volta
+    expect(corridor("r", "t", P(0, 0), P(100, 100))).toBeNull();  // cotovelo em L
+  });
+  it("encaixe fica no centro do lado do nó", async () => {
+    const { handlePoint, NODE_W: W, NODE_H: H } = await import("./layout");
+    expect(handlePoint(P(10, 20), "r")).toEqual(P(10 + W, 20 + H / 2));
+    expect(handlePoint(P(10, 20), "t")).toEqual(P(10 + W / 2, 20));
+  });
+  it("afasta setas que dividiriam o mesmo corredor; não mexe nas que não se sobrepõem", async () => {
+    const { corridorFractions } = await import("./layout");
+    const e = (id: string, ay: number, by: number) => ({ id, s: "r" as const, t: "l" as const, a: P(0, ay), b: P(100, by) });
+    const f = corridorFractions([e("a", 50, 200), e("b", 120, 300)]);          // trechos [50,200] e [120,300] se sobrepõem
+    expect(f.get("a")).toBeCloseTo(0.44); expect(f.get("b")).toBeCloseTo(0.56); // ±6px de 100
+    const g = corridorFractions([e("a", 50, 100), e("b", 200, 300)]);          // não se sobrepõem
+    expect([g.get("a"), g.get("b")]).toEqual([0.5, 0.5]);
+  });
+  it("a posição escolhida pelo usuário vence e fica dentro do vão", async () => {
+    const { corridorFractions } = await import("./layout");
+    const e = (id: string, manual?: number) => ({ id, s: "r" as const, t: "l" as const, a: P(0, 0), b: P(100, 100), manual });
+    const f = corridorFractions([e("a", 0.8), e("b", 5), e("c", -3), e("d")]);
+    expect(f.get("a")).toBe(0.8); expect(f.get("b")).toBe(0.94); expect(f.get("c")).toBe(0.06); expect(f.get("d")).toBe(0.5);
+  });
+  it("muitas setas no mesmo corredor encolhem o espaçamento para caber no vão", async () => {
+    const { corridorFractions } = await import("./layout");
+    const many = Array.from({ length: 12 }, (_, i) => ({ id: `e${i}`, s: "r" as const, t: "l" as const, a: P(0, i), b: P(44, 500 + i) }));
+    const f = [...corridorFractions(many).values()];
+    expect(Math.min(...f)).toBeGreaterThanOrEqual(0.06); expect(Math.max(...f)).toBeLessThanOrEqual(0.94);
+    expect(new Set(f.map((x) => x.toFixed(3))).size).toBe(12); // todas em posições distintas
+  });
+});
+
+describe("LayoutOverrides", () => {
+  it("aceita a posição do corredor e rejeita valores inválidos", async () => {
+    const { LayoutOverrides } = await import("./schema");
+    expect(LayoutOverrides.safeParse({ nodes: {}, edges: { "b/e": { s: "r", t: "l", mid: 0.7 } } }).success).toBe(true);
+    expect(LayoutOverrides.safeParse({ nodes: {}, edges: { "b/e": { mid: Infinity } } }).success).toBe(false);
+    expect(LayoutOverrides.safeParse({ nodes: {}, edges: { "b/e": { s: "x" } } }).success).toBe(false);
+  });
+});
+
+describe("caminho de 3 trechos", () => {
+  const P = (x: number, y: number) => ({ x, y });
+  const S = P(0, 0), T = P(100, 60);
+  it("padrão: 3 trechos com o corredor no meio, e alças no meio de cada trecho", async () => {
+    const { corridorRoute } = await import("./layout");
+    const r = corridorRoute("h", S, T, 0.5);
+    expect(r.pts).toEqual([S, P(50, 0), P(50, 60), T]);
+    expect(r.handles).toEqual({ a: P(25, 0), mid: P(50, 30), b: P(75, 60) });
+  });
+  it("empurrar o 1º trecho cria um degrau junto da origem; o corredor continua onde estava", async () => {
+    const { corridorRoute } = await import("./layout");
+    const r = corridorRoute("h", S, T, 0.5, 20);
+    expect(r.pts).toEqual([S, P(16, 0), P(16, 20), P(50, 20), P(50, 60), T]);
+    expect(r.handles.a).toEqual(P(33, 20));          // meio do trecho que foi empurrado
+    expect(r.handles.mid).toEqual(P(50, 40));        // o corredor agora vai de y=20 a y=60
+  });
+  it("empurrar o último trecho cria um degrau junto do destino", async () => {
+    const { corridorRoute } = await import("./layout");
+    const r = corridorRoute("h", S, T, 0.5, 0, -15);
+    expect(r.pts).toEqual([S, P(50, 0), P(50, 45), P(84, 45), P(84, 60), T]);
+    expect(r.handles.b).toEqual(P(67, 45));
+  });
+  it("os três ao mesmo tempo, em qualquer ordem de pontos, só tem trechos horizontais ou verticais", async () => {
+    const { corridorRoute } = await import("./layout");
+    const { pts } = corridorRoute("h", S, T, 0.3, 25, -25);
+    expect(pts).toHaveLength(8);
+    for (let i = 1; i < pts.length; i++) expect(pts[i].x === pts[i - 1].x || pts[i].y === pts[i - 1].y).toBe(true);
+    expect(pts[0]).toEqual(S); expect(pts.at(-1)).toEqual(T);
+  });
+  it("vertical (sai por baixo, entra por cima): eixos trocados", async () => {
+    const { corridorRoute } = await import("./layout");
+    const r = corridorRoute("v", P(0, 0), P(60, 100), 0.5, 20);
+    expect(r.pts).toEqual([P(0, 0), P(0, 16), P(20, 16), P(20, 50), P(60, 50), P(60, 100)]);
+  });
+  it("sentido invertido (sai pela esquerda) dá o degrau para o lado certo", async () => {
+    const { corridorRoute } = await import("./layout");
+    const r = corridorRoute("h", P(100, 0), P(0, 60), 0.5, 20);
+    expect(r.pts.slice(0, 3)).toEqual([P(100, 0), P(84, 0), P(84, 20)]);
+  });
+  it("degrau encolhe quando o vão é pequeno e o deslocamento é limitado", async () => {
+    const { corridorRoute, clampOffset } = await import("./layout");
+    const r = corridorRoute("h", P(0, 0), P(10, 60), 0.5, 20);
+    expect(r.pts[1].x).toBeCloseTo(2);               // 40% de 5px
+    expect(clampOffset(9999)).toBe(600); expect(clampOffset(-9999)).toBe(-600);
+  });
+  it("LayoutOverrides aceita a e b", async () => {
+    const { LayoutOverrides } = await import("./schema");
+    expect(LayoutOverrides.safeParse({ nodes: {}, edges: { "b/e": { mid: 0.4, a: 12, b: -8 } } }).success).toBe(true);
+    expect(LayoutOverrides.safeParse({ nodes: {}, edges: { "b/e": { a: Infinity } } }).success).toBe(false);
+  });
+});

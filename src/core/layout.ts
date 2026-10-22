@@ -122,3 +122,110 @@ export function stretchLayout(layout: Layout, board: Board, ov: LayoutOverrides)
   });
   return { nodes, lanes, width, height: y };
 }
+
+// ── corredor da linha: o trecho do meio de uma seta ortogonal, que o usuário pode empurrar de lado ──
+
+export type Orient = "h" | "v";
+
+/**
+ * A linha tem 3 trechos (e portanto um corredor no meio) quando sai e chega no mesmo eixo e o destino está "à frente".
+ * "h": corredor vertical em x (sai à direita e entra pela esquerda, ou o inverso). "v": corredor horizontal em y.
+ * Nos demais casos (cotovelo em L, volta) não há corredor para mover.
+ */
+export function corridor(s: Side, t: Side, a: Pt, b: Pt): Orient | null {
+  if (s === "r" && t === "l" && b.x > a.x) return "h";
+  if (s === "l" && t === "r" && b.x < a.x) return "h";
+  if (s === "b" && t === "t" && b.y > a.y) return "v";
+  if (s === "t" && t === "b" && b.y < a.y) return "v";
+  return null;
+}
+
+/** Ponto de encaixe (centro de um lado) de um nó cujo canto superior esquerdo é p. */
+export function handlePoint(p: Pt, side: Side): Pt {
+  if (side === "r") return { x: p.x + NODE_W, y: p.y + NODE_H / 2 };
+  if (side === "l") return { x: p.x, y: p.y + NODE_H / 2 };
+  if (side === "t") return { x: p.x + NODE_W / 2, y: p.y };
+  return { x: p.x + NODE_W / 2, y: p.y + NODE_H };
+}
+
+/** Mantém o corredor dentro do vão entre os dois nós, sem encostar neles. */
+export const clampFrac = (f: number) => Math.min(0.94, Math.max(0.06, f));
+
+export type EdgeGeom = { id: string; s: Side; t: Side; a: Pt; b: Pt; manual?: number };
+
+/**
+ * Fração (0..1) do caminho em que fica o corredor de cada seta: a escolhida pelo usuário ou 0,5. Setas automáticas que
+ * dividiriam o mesmo corredor (mesmo eixo e posição, trechos que se sobrepõem) são afastadas umas das outras.
+ */
+export function corridorFractions(edges: EdgeGeom[], gap = 12): Map<string, number> {
+  const out = new Map<string, number>();
+  type Item = EdgeGeom & { o: Orient; c: number; lo: number; hi: number; span: number };
+  const groups = new Map<string, Item[]>();
+  for (const e of edges) {
+    const o = corridor(e.s, e.t, e.a, e.b);
+    if (!o) continue;
+    if (e.manual !== undefined) { out.set(e.id, clampFrac(e.manual)); continue; }
+    out.set(e.id, 0.5);
+    const h = o === "h";
+    const it: Item = { ...e, o, c: h ? (e.a.x + e.b.x) / 2 : (e.a.y + e.b.y) / 2, span: Math.abs(h ? e.b.x - e.a.x : e.b.y - e.a.y),
+      lo: h ? Math.min(e.a.y, e.b.y) : Math.min(e.a.x, e.b.x), hi: h ? Math.max(e.a.y, e.b.y) : Math.max(e.a.x, e.b.x) };
+    const k = `${o}:${Math.round(it.c / 4)}`;
+    groups.set(k, [...(groups.get(k) ?? []), it]);
+  }
+  for (const g of groups.values()) {
+    g.sort((p, q) => p.lo - q.lo || p.id.localeCompare(q.id));
+    let cluster: Item[] = [];
+    let reach = -Infinity;
+    const flush = () => {
+      if (cluster.length < 2) return;
+      const step = Math.min(gap, (0.88 * Math.min(...cluster.map((c) => c.span))) / (cluster.length - 1));
+      cluster.forEach((it, i) => {
+        const start = it.o === "h" ? it.a.x : it.a.y;
+        const end = it.o === "h" ? it.b.x : it.b.y;
+        out.set(it.id, clampFrac((it.c + (i - (cluster.length - 1) / 2) * step - start) / (end - start)));
+      });
+    };
+    for (const it of g) {
+      if (it.lo <= reach) { cluster.push(it); reach = Math.max(reach, it.hi); }
+      else { flush(); cluster = [it]; reach = it.hi; }
+    }
+    flush();
+  }
+  return out;
+}
+
+const STUB = 16;
+export const SEG_LIMIT = 600;
+export const clampOffset = (v: number) => Math.min(SEG_LIMIT, Math.max(-SEG_LIMIT, v));
+
+export type CorridorRoute = { pts: Pt[]; handles: { a: Pt; mid: Pt; b: Pt } };
+
+/**
+ * Caminho de uma seta de 3 trechos (corredor). Os três trechos podem ser empurrados:
+ *  - f: posição do trecho do meio (fração do vão entre origem e destino);
+ *  - a: desloca o 1º trecho (o que sai da origem) para o lado; vira um "degrau" curto junto da origem;
+ *  - b: idem para o último trecho (o que chega no destino).
+ * Em "h" o corredor é vertical e a/b deslocam em y; em "v" o corredor é horizontal e a/b deslocam em x.
+ * `handles` são os pontos onde ficam as alças de arrasto (meio de cada trecho).
+ */
+export function corridorRoute(o: Orient, S: Pt, T: Pt, f: number, a = 0, b = 0): CorridorRoute {
+  const h = o === "h";
+  const [u0, v0, u1, v1] = h ? [S.x, S.y, T.x, T.y] : [S.y, S.x, T.y, T.x];
+  const xy = ([u, v]: [number, number]): Pt => (h ? { x: u, y: v } : { x: v, y: u });
+  const dir = Math.sign(u1 - u0) || 1;
+  const mu = u0 + clampFrac(f) * (u1 - u0);
+  const d1 = dir * Math.min(STUB, 0.4 * Math.abs(mu - u0));
+  const d2 = dir * Math.min(STUB, 0.4 * Math.abs(u1 - mu));
+  const pts: [number, number][] = [[u0, v0]];
+  if (a) pts.push([u0 + d1, v0], [u0 + d1, v0 + a], [mu, v0 + a]); else pts.push([mu, v0]);
+  if (b) pts.push([mu, v1 + b], [u1 - d2, v1 + b], [u1 - d2, v1]); else pts.push([mu, v1]);
+  pts.push([u1, v1]);
+  return {
+    pts: pts.map(xy),
+    handles: {
+      a: xy(a ? [(u0 + d1 + mu) / 2, v0 + a] : [(u0 + mu) / 2, v0]),
+      mid: xy([mu, (v0 + a + v1 + b) / 2]),
+      b: xy(b ? [(mu + u1 - d2) / 2, v1 + b] : [(mu + u1) / 2, v1]),
+    },
+  };
+}

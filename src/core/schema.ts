@@ -124,7 +124,8 @@ export const DEFAULT_LANES: LaneConfig[] = [
 export const Side = z.enum(["t", "b", "l", "r"]);
 export const LayoutOverrides = z.object({
   nodes: z.record(z.string(), z.object({ x: z.number().finite(), dy: z.number().finite() })),
-  edges: z.record(z.string(), z.object({ s: Side.optional(), t: Side.optional() })),
+  edges: z.record(z.string(), z.object({ s: Side.optional(), t: Side.optional(), mid: z.number().finite().optional(), a: z.number().finite().optional(), b: z.number().finite().optional() })),
+// mid: fração (0..1) do caminho onde fica o corredor do meio da linha; a/b: deslocamento (px) do 1º e do último trecho, perpendicular a eles
 });
 export type Side = z.infer<typeof Side>;
 export type LayoutOverrides = z.infer<typeof LayoutOverrides>;
